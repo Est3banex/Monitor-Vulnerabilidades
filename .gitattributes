@@ -1,0 +1,6 @@
+# Normalizar finales de línea (el repo se edita en Windows y se usa en la VM Alpine)
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary

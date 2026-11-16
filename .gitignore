@@ -1,0 +1,35 @@
+# ---------- Secretos ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+
+# ---------- Python ----------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# ---------- Node ----------
+node_modules/
+npm-debug.log*
+
+# ---------- Datos descargados (se regeneran) ----------
+data/*
+!data/.gitkeep
+
+# ---------- n8n ----------
+# Exportaciones crudas sin revisar: guardarlas aquí y limpiarlas antes de moverlas a workflows/
+workflows/_crudo/
+
+# ---------- Editor / SO ----------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

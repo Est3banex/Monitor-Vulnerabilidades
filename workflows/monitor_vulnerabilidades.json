@@ -1,0 +1,157 @@
+{
+  "name": "Monitor de vulnerabilidades",
+  "nodes": [
+    {
+      "id": "manual",
+      "name": "Disparo manual",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "horario",
+      "name": "Todos los días 7:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "kev",
+      "name": "M1 · Descargar CISA KEV",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        100
+      ],
+      "parameters": {
+        "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+        "options": {
+          "timeout": 60000
+        }
+      }
+    },
+    {
+      "id": "filtro",
+      "name": "M2 · Filtrar por fecha e inventario",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Módulo 2 — Filtro del catálogo CISA KEV (nodo Code de n8n, modo \"Run Once for All Items\").\n// Copia TODO este archivo dentro del nodo Code. El mismo archivo se prueba en local con:\n//   npm test\n//\n// Entrada (n8n): el JSON completo de CISA KEV  -> { count, vulnerabilities: [...] }\n// Salida:        0..N items { cveID, vendor, product, name, description, dateAdded, dueDate, ransomware }\n\n// ---- Configuración (v1: fija; v4: el inventario se leerá de la tabla INVENTARIO de Oracle) ----\nconst CONFIG = {\n  dias: 2, // ventana de dateAdded. Para probar usa 30.\n  inventario: ['microsoft', 'fortinet', 'apache', 'cisco'],\n};\n\n/**\n * Devuelve 'YYYY-MM-DD' de hace `dias` días respecto a `ahora`.\n * KEV publica dateAdded como 'YYYY-MM-DD', así que se compara como texto (sin líos de zona horaria).\n */\nfunction fechaDesde(dias, ahora = new Date()) {\n  const d = new Date(ahora.getTime() - dias * 24 * 60 * 60 * 1000);\n  return d.toISOString().slice(0, 10);\n}\n\nfunction normalizar(texto) {\n  return String(texto || '').trim().toLowerCase();\n}\n\n/**\n * Filtra el catálogo KEV por fecha e inventario y lo deja en un formato limpio.\n * @param {Array} vulnerabilidades  kev.vulnerabilities\n * @param {Object} opciones         { dias, inventario, ahora }\n */\nfunction filtrarKev(vulnerabilidades, { dias, inventario, ahora } = {}) {\n  if (!Array.isArray(vulnerabilidades)) {\n    throw new Error('Entrada inválida: se esperaba el arreglo \"vulnerabilities\" de CISA KEV');\n  }\n  const desde = fechaDesde(dias, ahora);\n  const vendors = new Set(inventario.map(normalizar));\n\n  return vulnerabilidades\n    .filter(v => typeof v.dateAdded === 'string' && v.dateAdded >= desde)\n    .filter(v => vendors.has(normalizar(v.vendorProject)))\n    .map(v => ({\n      cveID: v.cveID,\n      vendor: v.vendorProject,\n      product: v.product,\n      name: v.vulnerabilityName,\n      description: v.shortDescription,\n      dateAdded: v.dateAdded,\n      dueDate: v.dueDate,\n      ransomware: v.knownRansomwareCampaignUse === 'Known',\n    }))\n    .sort((a, b) => b.dateAdded.localeCompare(a.dateAdded));\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  // Dentro de n8n\n  const kev = $input.first().json;\n  const relevantes = filtrarKev(kev.vulnerabilities, CONFIG);\n  return relevantes.map(json => ({ json }));\n}\n// En Node (tests)\nmodule.exports = { filtrarKev, fechaDesde, CONFIG };\n"
+      }
+    },
+    {
+      "id": "formato",
+      "name": "M5 · Formatear mensaje",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Módulo 5 — Formato del mensaje de Telegram (nodo Code, modo \"Run Once for All Items\").\n// v2: se usa SIN IA (resumen = descripción de CISA). En v3/v4 llegan resumen, prioridad, accion y cvss.\n// El nodo Telegram debe enviar el campo {{ $json.mensaje }} como texto plano (sin parse mode).\n\nconst ICONOS = { alta: '🔴', media: '🟠', baja: '🟢', revisar: '⚪' };\n\nfunction formatearMensaje(v) {\n  const prioridad = v.prioridad || 'revisar';\n  const icono = ICONOS[prioridad] || ICONOS.revisar;\n  const cvss = v.cvss != null ? `CVSS ${v.cvss}` : 'CVSS s/d';\n  const ransomware = v.ransomware ? 'sí' : 'no';\n\n  return [\n    `${icono} PRIORIDAD ${prioridad.toUpperCase()} — ${v.cveID}`,\n    `Producto: ${v.vendor} ${v.product}  |  ${cvss}  |  Ransomware: ${ransomware}`,\n    `Qué pasa: ${v.resumen || v.description}`,\n    `Qué hacer: ${v.accion || 'Revisar el boletín del fabricante y aplicar la actualización.'}`,\n    `Fecha límite CISA: ${v.dueDate}`,\n  ].join('\\n');\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  return $input.all().map(item => ({\n    json: { ...item.json, mensaje: formatearMensaje(item.json) },\n  }));\n}\nmodule.exports = { formatearMensaje };\n"
+      }
+    },
+    {
+      "id": "telegram",
+      "name": "M5 · Enviar a Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        960,
+        100
+      ],
+      "parameters": {
+        "chatId": "",
+        "text": "={{ $json.mensaje }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Disparo manual": {
+      "main": [
+        [
+          {
+            "node": "M1 · Descargar CISA KEV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Todos los días 7:00": {
+      "main": [
+        [
+          {
+            "node": "M1 · Descargar CISA KEV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M1 · Descargar CISA KEV": {
+      "main": [
+        [
+          {
+            "node": "M2 · Filtrar por fecha e inventario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M2 · Filtrar por fecha e inventario": {
+      "main": [
+        [
+          {
+            "node": "M5 · Formatear mensaje",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M5 · Formatear mensaje": {
+      "main": [
+        [
+          {
+            "node": "M5 · Enviar a Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Bogota"
+  },
+  "pinData": {}
+}

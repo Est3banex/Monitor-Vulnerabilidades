@@ -1,0 +1,28 @@
+# n8n en la VM (Alpine, 192.168.56.67), unido a la red donde ya corre oracle-xe.
+# Uso (dentro de la VM):  docker compose up -d
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - GENERIC_TIMEZONE=America/Bogota
+      - TZ=America/Bogota
+      # Acceso por HTTP solo en red local (sin exposición a Internet)
+      - N8N_SECURE_COOKIE=false
+      # Las llamadas a Ollama en CPU pueden tardar
+      - N8N_RUNNERS_TASK_TIMEOUT=300
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - red_oracle
+
+volumes:
+  n8n_data:
+
+networks:
+  red_oracle:
+    external: true
+    name: red_oracle

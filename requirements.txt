@@ -1,0 +1,7 @@
+# Entorno Python del laptop: notebook de análisis del catálogo KEV
+pandas
+matplotlib
+requests
+python-dotenv
+jupyterlab
+ipykernel
