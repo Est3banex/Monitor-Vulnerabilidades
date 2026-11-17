@@ -1,16 +1,18 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { filtrarKev, fechaDesde, CONFIG } = require('../n8n/code/02_filtro_kev.js');
+const { filtrarKev, fechaDesde, extraerInventario, InventarioVacioError, CONFIG } = require('../n8n/code/02_filtro_kev.js');
 const kev = require('./fixtures/kev_muestra.json');
 
 const AHORA = new Date('2026-11-16T12:00:00Z');
+// Mismo inventario que sql/01_tablas.sql inserta para la clínica
+const OPCIONES = { ...CONFIG, inventario: ['Fortinet', 'Microsoft', 'Apache', 'Cisco'] };
 
 test('fechaDesde resta días y devuelve YYYY-MM-DD', () => {
   assert.strictEqual(fechaDesde(2, AHORA), '2026-11-14');
 });
 
 test('filtra por fecha e inventario, ordenado del más reciente', () => {
-  const r = filtrarKev(kev.vulnerabilities, { ...CONFIG, dias: 2, ahora: AHORA });
+  const r = filtrarKev(kev.vulnerabilities, { ...OPCIONES, dias: 2, ahora: AHORA });
   assert.deepStrictEqual(r.map(v => v.cveID), [
     'CVE-2026-00005', // Cisco (vendor con espacios/mayúsculas)
     'CVE-2026-00001', // Fortinet
@@ -19,13 +21,13 @@ test('filtra por fecha e inventario, ordenado del más reciente', () => {
 });
 
 test('una ventana más amplia incluye las antiguas', () => {
-  const r = filtrarKev(kev.vulnerabilities, { ...CONFIG, dias: 60, ahora: AHORA });
+  const r = filtrarKev(kev.vulnerabilities, { ...OPCIONES, dias: 60, ahora: AHORA });
   assert.ok(r.some(v => v.cveID === 'CVE-2025-00004'));
   assert.ok(!r.some(v => v.vendor === 'Ivanti'));
 });
 
 test('mapea los campos limpios y el flag de ransomware', () => {
-  const [forti] = filtrarKev(kev.vulnerabilities, { ...CONFIG, dias: 2, ahora: AHORA })
+  const [forti] = filtrarKev(kev.vulnerabilities, { ...OPCIONES, dias: 2, ahora: AHORA })
     .filter(v => v.vendor === 'Fortinet');
   assert.deepStrictEqual(forti, {
     cveID: 'CVE-2026-00001',
@@ -40,5 +42,15 @@ test('mapea los campos limpios y el flag de ransomware', () => {
 });
 
 test('entrada inválida lanza un error claro', () => {
-  assert.throws(() => filtrarKev(undefined, CONFIG), /vulnerabilities/);
+  assert.throws(() => filtrarKev(undefined, OPCIONES), /vulnerabilities/);
+});
+
+test('extraerInventario toma los fabricantes de las filas de Oracle', () => {
+  const filas = [{ vendor: 'Fortinet' }, { vendor: '  Cisco ' }, { vendor: null }, { vendor: '' }];
+  assert.deepStrictEqual(extraerInventario(filas), ['Fortinet', 'Cisco']);
+});
+
+test('inventario vacío (tabla sin filas: Oracle devuelve { success: true }) lanza InventarioVacioError', () => {
+  assert.throws(() => extraerInventario([{ success: true }]), InventarioVacioError);
+  assert.throws(() => extraerInventario([]), InventarioVacioError);
 });

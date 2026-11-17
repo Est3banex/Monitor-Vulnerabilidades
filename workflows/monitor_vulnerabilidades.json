@@ -49,17 +49,356 @@
       }
     },
     {
-      "id": "filtro",
-      "name": "M2 · Filtrar por fecha e inventario",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
+      "id": "inventario",
+      "name": "M4 · Leer inventario",
+      "type": "n8n-nodes-base.oracleDatabase",
+      "typeVersion": 1,
       "position": [
         480,
         100
       ],
       "parameters": {
-        "jsCode": "// Módulo 2 — Filtro del catálogo CISA KEV (nodo Code de n8n, modo \"Run Once for All Items\").\n// Copia TODO este archivo dentro del nodo Code. El mismo archivo se prueba en local con:\n//   npm test\n//\n// Entrada (n8n): el JSON completo de CISA KEV  -> { count, vulnerabilities: [...] }\n// Salida:        0..N items { cveID, vendor, product, name, description, dateAdded, dueDate, ransomware }\n\n// ---- Configuración (v1: fija; v4: el inventario se leerá de la tabla INVENTARIO de Oracle) ----\nconst CONFIG = {\n  dias: 2, // ventana de dateAdded. Para probar usa 30.\n  inventario: ['microsoft', 'fortinet', 'apache', 'cisco'],\n};\n\n/**\n * Devuelve 'YYYY-MM-DD' de hace `dias` días respecto a `ahora`.\n * KEV publica dateAdded como 'YYYY-MM-DD', así que se compara como texto (sin líos de zona horaria).\n */\nfunction fechaDesde(dias, ahora = new Date()) {\n  const d = new Date(ahora.getTime() - dias * 24 * 60 * 60 * 1000);\n  return d.toISOString().slice(0, 10);\n}\n\nfunction normalizar(texto) {\n  return String(texto || '').trim().toLowerCase();\n}\n\n/**\n * Filtra el catálogo KEV por fecha e inventario y lo deja en un formato limpio.\n * @param {Array} vulnerabilidades  kev.vulnerabilities\n * @param {Object} opciones         { dias, inventario, ahora }\n */\nfunction filtrarKev(vulnerabilidades, { dias, inventario, ahora } = {}) {\n  if (!Array.isArray(vulnerabilidades)) {\n    throw new Error('Entrada inválida: se esperaba el arreglo \"vulnerabilities\" de CISA KEV');\n  }\n  const desde = fechaDesde(dias, ahora);\n  const vendors = new Set(inventario.map(normalizar));\n\n  return vulnerabilidades\n    .filter(v => typeof v.dateAdded === 'string' && v.dateAdded >= desde)\n    .filter(v => vendors.has(normalizar(v.vendorProject)))\n    .map(v => ({\n      cveID: v.cveID,\n      vendor: v.vendorProject,\n      product: v.product,\n      name: v.vulnerabilityName,\n      description: v.shortDescription,\n      dateAdded: v.dateAdded,\n      dueDate: v.dueDate,\n      ransomware: v.knownRansomwareCampaignUse === 'Known',\n    }))\n    .sort((a, b) => b.dateAdded.localeCompare(a.dateAdded));\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  // Dentro de n8n\n  const kev = $input.first().json;\n  const relevantes = filtrarKev(kev.vulnerabilities, CONFIG);\n  return relevantes.map(json => ({ json }));\n}\n// En Node (tests)\nmodule.exports = { filtrarKev, fechaDesde, CONFIG };\n"
+        "operation": "execute",
+        "query": "SELECT vendor AS \"vendor\"\nFROM inventario\nWHERE activo = 'S'",
+        "options": {}
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "filtro",
+      "name": "M2 · Filtrar por fecha e inventario",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Módulo 2 — Filtro del catálogo CISA KEV (nodo Code de n8n, modo \"Run Once for All Items\").\n// Copia TODO este archivo dentro del nodo Code. El mismo archivo se prueba en local con:\n//   npm test\n//\n// Entrada ($input):       filas de Oracle del nodo \"M4 · Leer inventario\" -> { vendor }\n// Entrada ($(NODO_KEV)):  el JSON completo de CISA KEV -> { count, vulnerabilities: [...] }\n// Salida:        0..N items { cveID, vendor, product, name, description, dateAdded, dueDate, ransomware }\n\nconst NODO_KEV = 'M1 · Descargar CISA KEV';\n\nconst CONFIG = {\n  dias: 2, // ventana de dateAdded. Para probar usa 30.\n};\n\nclass InventarioVacioError extends Error {\n  constructor(mensaje) {\n    super(mensaje);\n    this.name = 'InventarioVacioError';\n  }\n}\n\n/**\n * Convierte las filas de la tabla INVENTARIO en la lista de fabricantes.\n * Un inventario vacío se trata como error: casi siempre es una tabla sin datos o un fallo de conexión,\n * y filtrar contra nada dejaría el sistema \"funcionando\" sin avisar de ninguna vulnerabilidad.\n * @param {Array<Object>} filas  filas { vendor }; las que no traen vendor (p. ej. { success: true }) se ignoran\n * @returns {Array<string>}\n * @throws {InventarioVacioError}\n */\nfunction extraerInventario(filas) {\n  const vendors = filas\n    .map(f => (f && typeof f.vendor === 'string' ? f.vendor.trim() : ''))\n    .filter(v => v !== '');\n  if (vendors.length === 0) {\n    throw new InventarioVacioError('Leer inventario: la tabla INVENTARIO no tiene fabricantes activos');\n  }\n  return vendors;\n}\n\n/**\n * Devuelve 'YYYY-MM-DD' de hace `dias` días respecto a `ahora`.\n * KEV publica dateAdded como 'YYYY-MM-DD', así que se compara como texto (sin líos de zona horaria).\n */\nfunction fechaDesde(dias, ahora = new Date()) {\n  const d = new Date(ahora.getTime() - dias * 24 * 60 * 60 * 1000);\n  return d.toISOString().slice(0, 10);\n}\n\nfunction normalizar(texto) {\n  return String(texto || '').trim().toLowerCase();\n}\n\n/**\n * Filtra el catálogo KEV por fecha e inventario y lo deja en un formato limpio.\n * @param {Array} vulnerabilidades  kev.vulnerabilities\n * @param {Object} opciones         { dias, inventario, ahora }\n */\nfunction filtrarKev(vulnerabilidades, { dias, inventario, ahora } = {}) {\n  if (!Array.isArray(vulnerabilidades)) {\n    throw new Error('Entrada inválida: se esperaba el arreglo \"vulnerabilities\" de CISA KEV');\n  }\n  const desde = fechaDesde(dias, ahora);\n  const vendors = new Set(inventario.map(normalizar));\n\n  return vulnerabilidades\n    .filter(v => typeof v.dateAdded === 'string' && v.dateAdded >= desde)\n    .filter(v => vendors.has(normalizar(v.vendorProject)))\n    .map(v => ({\n      cveID: v.cveID,\n      vendor: v.vendorProject,\n      product: v.product,\n      name: v.vulnerabilityName,\n      description: v.shortDescription,\n      dateAdded: v.dateAdded,\n      dueDate: v.dueDate,\n      ransomware: v.knownRansomwareCampaignUse === 'Known',\n    }))\n    .sort((a, b) => b.dateAdded.localeCompare(a.dateAdded));\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  // Dentro de n8n\n  const kev = $(NODO_KEV).first().json;\n  const inventario = extraerInventario($input.all().map(item => item.json));\n  const relevantes = filtrarKev(kev.vulnerabilities, { ...CONFIG, inventario });\n  return relevantes.map(json => ({ json }));\n}\n// En Node (tests)\nmodule.exports = { filtrarKev, fechaDesde, extraerInventario, InventarioVacioError, CONFIG };\n"
       }
+    },
+    {
+      "id": "registrados",
+      "name": "M4 · CVE ya registrados",
+      "type": "n8n-nodes-base.oracleDatabase",
+      "typeVersion": 1,
+      "position": [
+        960,
+        100
+      ],
+      "parameters": {
+        "operation": "execute",
+        "query": "SELECT cve_id AS \"cveID\"\nFROM vulnerabilidades",
+        "options": {}
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "descartar",
+      "name": "M4 · Descartar ya registrados",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Módulo 4 — Descartar las vulnerabilidades que ya están en Oracle (nodo Code, modo \"Run Once for All Items\").\n// Va después del nodo Oracle \"M4 · CVE ya registrados\". Así NVD y la IA solo trabajan con lo nuevo.\n//\n// Entrada ($input): filas de Oracle { cveID } (o un único { success: true } si la tabla está vacía).\n// Entrada ($(NODO_FILTRO)): las vulnerabilidades relevantes que salieron del filtro (M2).\n// Salida:  las vulnerabilidades cuyo cveID no está registrado.\n\nconst NODO_FILTRO = 'M2 · Filtrar por fecha e inventario';\n\n/**\n * @param {Array<Object>} vulnerabilidades  items del filtro\n * @param {Array<Object>} filas             filas de Oracle; las que no traen cveID (p. ej. { success: true }) se ignoran\n * @returns {Array<Object>}\n */\nfunction descartarRegistrados(vulnerabilidades, filas) {\n  const registrados = new Set(\n    filas.filter(f => f && typeof f.cveID === 'string').map(f => f.cveID),\n  );\n  return vulnerabilidades.filter(v => !registrados.has(v.cveID));\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  const vulnerabilidades = $(NODO_FILTRO).all().map(item => item.json);\n  const filas = $input.all().map(item => item.json);\n  return descartarRegistrados(vulnerabilidades, filas).map(json => ({ json }));\n}\nmodule.exports = { descartarRegistrados, NODO_FILTRO };\n"
+      }
+    },
+    {
+      "id": "nvd",
+      "name": "M4 · Consultar NVD",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 6000,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "url": "https://services.nvd.nist.gov/rest/json/cves/2.0",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "cveId",
+              "value": "={{ $json.cveID }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 700
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "prioridad",
+      "name": "M4 · Calcular CVSS y prioridad",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Módulo 4 — CVSS de NVD y prioridad por reglas (nodo Code, modo \"Run Once for All Items\").\n// Va justo después del nodo HTTP que consulta NVD. Copia TODO este archivo dentro del nodo Code.\n//\n// Entrada: la respuesta de NVD por cada CVE ({ totalResults, vulnerabilities } o { error }).\n// Salida:  la vulnerabilidad + { cvss, severidad, fuenteCvss, motivoSinCvss, prioridad }.\n//\n// La prioridad la deciden reglas fijas, no la IA: un modelo de 3-4B sobrestimaba la urgencia\n// (ver prompts/analista.md). La IA solo redacta el resumen y la acción.\n\nconst NODO_ORIGEN = 'M4 · Descartar ya registrados';\n\n// Orden de preferencia de versiones de CVSS presentes en NVD 2.0. Otras métricas (p. ej. ssvcV203) se ignoran.\nconst VERSIONES_CVSS = ['cvssMetricV31', 'cvssMetricV30', 'cvssMetricV40', 'cvssMetricV2'];\n\nconst MOTIVOS_SIN_CVSS = {\n  SIN_RESPUESTA: 'sin_respuesta',\n  NO_ENCONTRADO: 'no_encontrado',\n  SIN_METRICAS: 'sin_metricas',\n};\n\nconst UMBRALES = { alta: 9, media: 7 };\n\n/**\n * @typedef {'alta'|'media'|'baja'|'revisar'} Prioridad\n * @typedef {{ok: true, cvss: number, severidad: string|null, fuente: string}\n *         | {ok: false, motivo: string, detalle: string}} ResultadoCvss\n */\n\nfunction puntajeValido(valor) {\n  return typeof valor === 'number' && Number.isFinite(valor) && valor >= 0 && valor <= 10;\n}\n\n/** Primary (NIST) primero; si no hay, Secondary (el fabricante), que es lo habitual en CVE recientes. */\nfunction mejorMetrica(metricas) {\n  const validas = metricas.filter(m => m && m.cvssData && puntajeValido(m.cvssData.baseScore));\n  return validas.find(m => m.type === 'Primary') || validas[0] || null;\n}\n\n/**\n * @param {Object} respuestaNvd  json del nodo HTTP de NVD\n * @returns {ResultadoCvss}\n */\n/**\n * Describe una respuesta inesperada de NVD. Según la versión de n8n, el error del nodo HTTP llega\n * como texto ({ error: '...' }) o como objeto ({ error: { message, httpCode } }).\n */\nfunction describirRespuesta(respuesta) {\n  if (!respuesta || typeof respuesta !== 'object') return `respuesta vacía (${JSON.stringify(respuesta)})`;\n  const { error } = respuesta;\n  if (typeof error === 'string' && error !== '') return error;\n  if (error && typeof error === 'object') {\n    // code: errores de Node antes de enviar la solicitud (p. ej. ERR_INVALID_HTTP_TOKEN = nombre de header inválido)\n    const partes = [error.httpCode, error.code, error.message, error.description].filter(p => p !== undefined && p !== '');\n    if (partes.length > 0) return partes.join(' - ');\n    // Formato desconocido: se muestra tal cual (recortado) para poder diagnosticarlo en n8n\n    return `error sin mensaje conocido: ${JSON.stringify(error).slice(0, 300)}`;\n  }\n  if (error !== undefined) return `error sin mensaje: ${JSON.stringify(error)}`;\n  return `la respuesta no trae \"vulnerabilities\"; claves recibidas: ${Object.keys(respuesta).slice(0, 8).join(', ') || 'ninguna'}`;\n}\n\nfunction extraerCvss(respuestaNvd) {\n  if (!respuestaNvd || !Array.isArray(respuestaNvd.vulnerabilities)) {\n    return { ok: false, motivo: MOTIVOS_SIN_CVSS.SIN_RESPUESTA, detalle: describirRespuesta(respuestaNvd) };\n  }\n  const cve = respuestaNvd.vulnerabilities[0] && respuestaNvd.vulnerabilities[0].cve;\n  if (!cve) {\n    return { ok: false, motivo: MOTIVOS_SIN_CVSS.NO_ENCONTRADO, detalle: 'NVD no tiene registro del CVE' };\n  }\n\n  const metricas = cve.metrics || {};\n  for (const version of VERSIONES_CVSS) {\n    const elegida = Array.isArray(metricas[version]) ? mejorMetrica(metricas[version]) : null;\n    if (elegida) {\n      const severidad = elegida.cvssData.baseSeverity || elegida.baseSeverity || null;\n      return { ok: true, cvss: elegida.cvssData.baseScore, severidad, fuente: `${version}/${elegida.type || 's/d'}` };\n    }\n  }\n  return { ok: false, motivo: MOTIVOS_SIN_CVSS.SIN_METRICAS, detalle: 'NVD aún no publica un puntaje CVSS' };\n}\n\n/**\n * Reglas: ransomware o CVSS >= 9 -> alta; 7 a 8.9 -> media; < 7 -> baja; sin CVSS -> revisar.\n * @param {{ransomware: boolean, cvss: number|null}} datos\n * @returns {Prioridad}\n */\nfunction calcularPrioridad({ ransomware, cvss }) {\n  if (ransomware === true) return 'alta';\n  if (cvss === null) return 'revisar';\n  if (cvss >= UMBRALES.alta) return 'alta';\n  if (cvss >= UMBRALES.media) return 'media';\n  return 'baja';\n}\n\n/**\n * @param {Object} vulnerabilidad  item del filtro (M2) ya sin los registrados\n * @param {Object} respuestaNvd\n */\nfunction enriquecerConNvd(vulnerabilidad, respuestaNvd) {\n  const resultado = extraerCvss(respuestaNvd);\n  const cvss = resultado.ok ? resultado.cvss : null;\n  return {\n    ...vulnerabilidad,\n    cvss,\n    severidad: resultado.ok ? resultado.severidad : null,\n    fuenteCvss: resultado.ok ? resultado.fuente : null,\n    motivoSinCvss: resultado.ok ? null : `${resultado.motivo}: ${resultado.detalle}`,\n    prioridad: calcularPrioridad({ ransomware: vulnerabilidad.ransomware, cvss }),\n  };\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  // El nodo HTTP reemplaza el item por la respuesta de NVD; la vulnerabilidad se recupera del nodo anterior.\n  return $input.all().map((item, i) => ({\n    json: enriquecerConNvd($(NODO_ORIGEN).itemMatching(i).json, item.json),\n  }));\n}\nmodule.exports = { extraerCvss, calcularPrioridad, enriquecerConNvd, MOTIVOS_SIN_CVSS, NODO_ORIGEN };\n"
+      }
+    },
+    {
+      "id": "preparar",
+      "name": "M3 · Preparar solicitud",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Módulo 3 — Preparar la solicitud al Analista IA (nodo Code, modo \"Run Once for All Items\").\n// Se usa en dos nodos: \"M3 · Preparar solicitud\" (intento 1) y \"M3 · Preparar reintento\" (intento 2).\n// Copia TODO este archivo dentro del nodo Code. Se prueba en local con: npm test\n//\n// Entrada: items con CVSS y prioridad (M4 · Calcular CVSS y prioridad) o items del validador con reintentar = true.\n// Salida:  el mismo item limpio + { intento, solicitudOllama } listo para el nodo HTTP de Ollama.\n\nconst CONFIG = {\n  modelo: 'phi4-mini',\n  // temperature 0: la misma vulnerabilidad debe producir la misma clasificación\n  opciones: { temperature: 0 },\n};\n\n// Campos de control que agrega este módulo o el validador; no son datos de la vulnerabilidad.\nconst CAMPOS_CONTROL = ['intento', 'reintentar', 'motivoFallo', 'detalleFallo', 'solicitudOllama'];\n\nclass EntradaInvalidaError extends Error {\n  constructor(mensaje) {\n    super(mensaje);\n    this.name = 'EntradaInvalidaError';\n  }\n}\n\n/**\n * @typedef {Object} Vulnerabilidad\n * @property {string} cveID\n * @property {string} vendor\n * @property {string} product\n * @property {string} name\n * @property {string} description\n * @property {string} dueDate          'YYYY-MM-DD'\n * @property {boolean} ransomware\n * @property {number|null} cvss       de NVD; null si aún no tiene puntaje\n * @property {'alta'|'media'|'baja'|'revisar'} prioridad  decidida por reglas\n */\n\n/** Separa los datos de la vulnerabilidad de los campos de control. */\nfunction datosVulnerabilidad(item) {\n  return Object.fromEntries(Object.entries(item).filter(([k]) => !CAMPOS_CONTROL.includes(k)));\n}\n\n/** Solo los datos que el modelo necesita: menos texto = respuesta más rápida en CPU. */\nfunction datosParaPrompt(v) {\n  const datos = {\n    cve: v.cveID,\n    fabricante: v.vendor,\n    producto: v.product,\n    nombre: v.name,\n    descripcion: v.description,\n    usada_en_ransomware: v.ransomware,\n    fecha_limite_cisa: v.dueDate,\n  };\n  const conCvss = typeof v.cvss === 'number' ? { ...datos, cvss: v.cvss } : datos;\n  return { ...conCvss, prioridad: v.prioridad };\n}\n\n// La prioridad ya viene decidida por reglas (04_cvss_prioridad.js); el modelo solo redacta.\n// Se le entrega para que la urgencia de la acción sea coherente con ella.\nfunction construirPrompt(v) {\n  return [\n    'Eres un analista de ciberseguridad que asesora al único encargado de sistemas de una clínica pequeña.',\n    'Con los datos de la vulnerabilidad, responde SOLO un objeto JSON con exactamente estas claves:',\n    '- \"resumen\": máximo 2 frases en español, explicando qué permite hacer a un atacante.',\n    '- \"accion\": 1 frase completa en español, con un verbo y el nombre del producto, que diga qué hacer y cuándo.',\n    // Con la lista de urgencias como palabras sueltas, phi4-mini respondía accion = \"revisar\" (probado 17-nov-2026)\n    'La prioridad ya está decidida; no la cambies ni la menciones. Según la prioridad, el plazo de la acción es:',\n    'alta -> hoy mismo; media -> durante esta semana; baja -> en el próximo ciclo de actualizaciones;',\n    'revisar -> primero confirmar si el producto está instalado y expuesto a Internet.',\n    'Ejemplo de accion (otro producto): \"Aplicar durante esta semana el parche de seguridad de Apache Tomcat publicado por el fabricante.\"',\n    'No inventes versiones, parches ni impactos que no estén en los datos.',\n    `Datos: ${JSON.stringify(datosParaPrompt(v))}`,\n  ].join('\\n');\n}\n\n/**\n * @param {Object} item  item de entrada (vulnerabilidad, con o sin campos de control)\n * @returns {Object}     vulnerabilidad + { intento, solicitudOllama }\n * @throws {EntradaInvalidaError}\n */\nfunction prepararSolicitud(item, config = CONFIG) {\n  if (!item || typeof item.cveID !== 'string' || item.cveID === '') {\n    throw new EntradaInvalidaError('Preparar solicitud: el item no tiene un cveID válido');\n  }\n  const intentoPrevio = Number.isInteger(item.intento) ? item.intento : 0;\n  const vulnerabilidad = datosVulnerabilidad(item);\n\n  return {\n    ...vulnerabilidad,\n    intento: intentoPrevio + 1,\n    solicitudOllama: {\n      model: config.modelo,\n      stream: false,\n      format: 'json',\n      prompt: construirPrompt(vulnerabilidad),\n      options: config.opciones,\n    },\n  };\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  return $input.all().map(item => ({ json: prepararSolicitud(item.json) }));\n}\nmodule.exports = { prepararSolicitud, construirPrompt, datosVulnerabilidad, EntradaInvalidaError, CONFIG, CAMPOS_CONTROL };\n"
+      }
+    },
+    {
+      "id": "ollama",
+      "name": "M3 · Consultar Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2160,
+        100
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.56.1:11434/api/generate",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.solicitudOllama }}",
+        "options": {
+          "timeout": 300000
+        }
+      }
+    },
+    {
+      "id": "validar",
+      "name": "M3 · Validar análisis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Módulo 3 — Validar la respuesta del Analista IA (nodo Code, modo \"Run Once for All Items\").\n// Se usa en dos nodos: \"M3 · Validar análisis\" (intento 1) y \"M3 · Validar reintento\" (intento 2).\n// Copia TODO este archivo dentro del nodo Code y ajusta NODO_SOLICITUD al nombre del nodo\n// \"Preparar ...\" que va justo antes del HTTP de Ollama (scripts/construir_workflow.js lo hace solo).\n//\n// Entrada: la respuesta del nodo HTTP de Ollama ({ response: \"<texto JSON>\" } o { error: \"...\" }).\n// Salida:  la vulnerabilidad (con su prioridad por reglas intacta) + una de estas tres formas:\n//   - válida:     { resumen, accion, reintentar: false }\n//   - reintentar: { reintentar: true, motivoFallo, detalleFallo }                   (si quedan intentos)\n//   - sin texto:  { resumen: null, accion: null, reintentar: false, motivoFallo, detalleFallo }\n// Que la IA falle no cambia la prioridad: una vulnerabilidad \"alta\" debe avisarse aunque no haya resumen.\n\nconst NODO_SOLICITUD = 'M3 · Preparar solicitud';\nconst MAX_INTENTOS = 2;\n// Coinciden con las columnas resumen_es VARCHAR2(1000) y accion VARCHAR2(500) de Oracle (v4)\nconst LIMITES = { resumen: 1000, accion: 500 };\n\nconst MOTIVOS = {\n  SIN_RESPUESTA: 'sin_respuesta',\n  JSON_INVALIDO: 'json_invalido',\n  CAMPO_FALTANTE: 'campo_faltante',\n  CAMPO_MUY_LARGO: 'campo_muy_largo',\n  ACCION_INCOMPLETA: 'accion_incompleta',\n};\n\n// Una acción de 1-2 palabras (p. ej. \"revisar\", visto con phi4-mini) no es ejecutable por el encargado.\nconst MIN_PALABRAS_ACCION = 3;\n\n// Duplicado de 03_preparar_solicitud.js: cada nodo Code de n8n es independiente y no puede importar otro.\nconst CAMPOS_CONTROL = ['intento', 'reintentar', 'motivoFallo', 'detalleFallo', 'solicitudOllama'];\n\nclass EntradaInvalidaError extends Error {\n  constructor(mensaje) {\n    super(mensaje);\n    this.name = 'EntradaInvalidaError';\n  }\n}\n\nfunction datosVulnerabilidad(item) {\n  return Object.fromEntries(Object.entries(item).filter(([k]) => !CAMPOS_CONTROL.includes(k)));\n}\n\nfunction fallo(motivo, detalle) {\n  return { ok: false, motivo, detalle };\n}\n\nfunction textoLimpio(valor) {\n  return typeof valor === 'string' ? valor.trim() : '';\n}\n\n/**\n * Interpreta la respuesta cruda de Ollama.\n * @param {Object} respuestaOllama  json del nodo HTTP: { response: string } o { error: string }\n * @returns {{ok: true, analisis: {resumen: string, accion: string}}\n *         | {ok: false, motivo: string, detalle: string}}\n */\nfunction interpretarRespuesta(respuestaOllama) {\n  if (!respuestaOllama || typeof respuestaOllama.response !== 'string') {\n    const detalle = textoLimpio(respuestaOllama && respuestaOllama.error) || 'la respuesta no trae el campo \"response\"';\n    return fallo(MOTIVOS.SIN_RESPUESTA, detalle);\n  }\n\n  let datos;\n  try {\n    datos = JSON.parse(respuestaOllama.response);\n  } catch (error) {\n    return fallo(MOTIVOS.JSON_INVALIDO, error.message);\n  }\n  if (datos === null || typeof datos !== 'object' || Array.isArray(datos)) {\n    return fallo(MOTIVOS.JSON_INVALIDO, 'se esperaba un objeto JSON');\n  }\n\n  const resumen = textoLimpio(datos.resumen);\n  const accion = textoLimpio(datos.accion);\n  if (resumen === '' || accion === '') {\n    return fallo(MOTIVOS.CAMPO_FALTANTE, 'faltan \"resumen\" o \"accion\"');\n  }\n  if (resumen.length > LIMITES.resumen || accion.length > LIMITES.accion) {\n    return fallo(MOTIVOS.CAMPO_MUY_LARGO, `resumen ${resumen.length}/${LIMITES.resumen}, accion ${accion.length}/${LIMITES.accion}`);\n  }\n  const palabras = accion.split(/\\s+/).length;\n  if (palabras < MIN_PALABRAS_ACCION) {\n    return fallo(MOTIVOS.ACCION_INCOMPLETA, `accion con ${palabras} palabra(s): ${JSON.stringify(accion)}`);\n  }\n\n  return { ok: true, analisis: { resumen, accion } };\n}\n\n/**\n * Decide el resultado final del item: análisis válido, reintento o sin texto de la IA.\n * @param {Object} solicitud        item que salió del nodo \"Preparar ...\" (vulnerabilidad + intento)\n * @param {Object} respuestaOllama  item que salió del nodo HTTP de Ollama\n * @throws {EntradaInvalidaError}\n */\nfunction resolverAnalisis(solicitud, respuestaOllama, maxIntentos = MAX_INTENTOS) {\n  if (!solicitud || typeof solicitud.cveID !== 'string' || !Number.isInteger(solicitud.intento)) {\n    throw new EntradaInvalidaError('Validar análisis: la solicitud original no tiene cveID o intento');\n  }\n  const vulnerabilidad = datosVulnerabilidad(solicitud);\n  const { intento } = solicitud;\n  const resultado = interpretarRespuesta(respuestaOllama);\n\n  if (resultado.ok) {\n    return { ...vulnerabilidad, ...resultado.analisis, intento, reintentar: false };\n  }\n  const diagnostico = { motivoFallo: resultado.motivo, detalleFallo: resultado.detalle };\n  if (intento < maxIntentos) {\n    return { ...vulnerabilidad, intento, reintentar: true, ...diagnostico };\n  }\n  return { ...vulnerabilidad, intento, reintentar: false, resumen: null, accion: null, ...diagnostico };\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  // El nodo HTTP reemplaza el item por la respuesta; la vulnerabilidad se recupera del nodo que preparó la solicitud.\n  return $input.all().map((item, i) => ({\n    json: resolverAnalisis($(NODO_SOLICITUD).itemMatching(i).json, item.json),\n  }));\n}\nmodule.exports = { resolverAnalisis, interpretarRespuesta, EntradaInvalidaError, MOTIVOS, MAX_INTENTOS, NODO_SOLICITUD };\n"
+      }
+    },
+    {
+      "id": "reintentar",
+      "name": "¿Reintentar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2640,
+        100
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "reintentar-true",
+              "leftValue": "={{ $json.reintentar }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "preparar-reintento",
+      "name": "M3 · Preparar reintento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Módulo 3 — Preparar la solicitud al Analista IA (nodo Code, modo \"Run Once for All Items\").\n// Se usa en dos nodos: \"M3 · Preparar solicitud\" (intento 1) y \"M3 · Preparar reintento\" (intento 2).\n// Copia TODO este archivo dentro del nodo Code. Se prueba en local con: npm test\n//\n// Entrada: items con CVSS y prioridad (M4 · Calcular CVSS y prioridad) o items del validador con reintentar = true.\n// Salida:  el mismo item limpio + { intento, solicitudOllama } listo para el nodo HTTP de Ollama.\n\nconst CONFIG = {\n  modelo: 'phi4-mini',\n  // temperature 0: la misma vulnerabilidad debe producir la misma clasificación\n  opciones: { temperature: 0 },\n};\n\n// Campos de control que agrega este módulo o el validador; no son datos de la vulnerabilidad.\nconst CAMPOS_CONTROL = ['intento', 'reintentar', 'motivoFallo', 'detalleFallo', 'solicitudOllama'];\n\nclass EntradaInvalidaError extends Error {\n  constructor(mensaje) {\n    super(mensaje);\n    this.name = 'EntradaInvalidaError';\n  }\n}\n\n/**\n * @typedef {Object} Vulnerabilidad\n * @property {string} cveID\n * @property {string} vendor\n * @property {string} product\n * @property {string} name\n * @property {string} description\n * @property {string} dueDate          'YYYY-MM-DD'\n * @property {boolean} ransomware\n * @property {number|null} cvss       de NVD; null si aún no tiene puntaje\n * @property {'alta'|'media'|'baja'|'revisar'} prioridad  decidida por reglas\n */\n\n/** Separa los datos de la vulnerabilidad de los campos de control. */\nfunction datosVulnerabilidad(item) {\n  return Object.fromEntries(Object.entries(item).filter(([k]) => !CAMPOS_CONTROL.includes(k)));\n}\n\n/** Solo los datos que el modelo necesita: menos texto = respuesta más rápida en CPU. */\nfunction datosParaPrompt(v) {\n  const datos = {\n    cve: v.cveID,\n    fabricante: v.vendor,\n    producto: v.product,\n    nombre: v.name,\n    descripcion: v.description,\n    usada_en_ransomware: v.ransomware,\n    fecha_limite_cisa: v.dueDate,\n  };\n  const conCvss = typeof v.cvss === 'number' ? { ...datos, cvss: v.cvss } : datos;\n  return { ...conCvss, prioridad: v.prioridad };\n}\n\n// La prioridad ya viene decidida por reglas (04_cvss_prioridad.js); el modelo solo redacta.\n// Se le entrega para que la urgencia de la acción sea coherente con ella.\nfunction construirPrompt(v) {\n  return [\n    'Eres un analista de ciberseguridad que asesora al único encargado de sistemas de una clínica pequeña.',\n    'Con los datos de la vulnerabilidad, responde SOLO un objeto JSON con exactamente estas claves:',\n    '- \"resumen\": máximo 2 frases en español, explicando qué permite hacer a un atacante.',\n    '- \"accion\": 1 frase completa en español, con un verbo y el nombre del producto, que diga qué hacer y cuándo.',\n    // Con la lista de urgencias como palabras sueltas, phi4-mini respondía accion = \"revisar\" (probado 17-nov-2026)\n    'La prioridad ya está decidida; no la cambies ni la menciones. Según la prioridad, el plazo de la acción es:',\n    'alta -> hoy mismo; media -> durante esta semana; baja -> en el próximo ciclo de actualizaciones;',\n    'revisar -> primero confirmar si el producto está instalado y expuesto a Internet.',\n    'Ejemplo de accion (otro producto): \"Aplicar durante esta semana el parche de seguridad de Apache Tomcat publicado por el fabricante.\"',\n    'No inventes versiones, parches ni impactos que no estén en los datos.',\n    `Datos: ${JSON.stringify(datosParaPrompt(v))}`,\n  ].join('\\n');\n}\n\n/**\n * @param {Object} item  item de entrada (vulnerabilidad, con o sin campos de control)\n * @returns {Object}     vulnerabilidad + { intento, solicitudOllama }\n * @throws {EntradaInvalidaError}\n */\nfunction prepararSolicitud(item, config = CONFIG) {\n  if (!item || typeof item.cveID !== 'string' || item.cveID === '') {\n    throw new EntradaInvalidaError('Preparar solicitud: el item no tiene un cveID válido');\n  }\n  const intentoPrevio = Number.isInteger(item.intento) ? item.intento : 0;\n  const vulnerabilidad = datosVulnerabilidad(item);\n\n  return {\n    ...vulnerabilidad,\n    intento: intentoPrevio + 1,\n    solicitudOllama: {\n      model: config.modelo,\n      stream: false,\n      format: 'json',\n      prompt: construirPrompt(vulnerabilidad),\n      options: config.opciones,\n    },\n  };\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  return $input.all().map(item => ({ json: prepararSolicitud(item.json) }));\n}\nmodule.exports = { prepararSolicitud, construirPrompt, datosVulnerabilidad, EntradaInvalidaError, CONFIG, CAMPOS_CONTROL };\n"
+      }
+    },
+    {
+      "id": "ollama-reintento",
+      "name": "M3 · Consultar Ollama (reintento)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3120,
+        0
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.56.1:11434/api/generate",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.solicitudOllama }}",
+        "options": {
+          "timeout": 300000
+        }
+      }
+    },
+    {
+      "id": "validar-reintento",
+      "name": "M3 · Validar reintento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Módulo 3 — Validar la respuesta del Analista IA (nodo Code, modo \"Run Once for All Items\").\n// Se usa en dos nodos: \"M3 · Validar análisis\" (intento 1) y \"M3 · Validar reintento\" (intento 2).\n// Copia TODO este archivo dentro del nodo Code y ajusta NODO_SOLICITUD al nombre del nodo\n// \"Preparar ...\" que va justo antes del HTTP de Ollama (scripts/construir_workflow.js lo hace solo).\n//\n// Entrada: la respuesta del nodo HTTP de Ollama ({ response: \"<texto JSON>\" } o { error: \"...\" }).\n// Salida:  la vulnerabilidad (con su prioridad por reglas intacta) + una de estas tres formas:\n//   - válida:     { resumen, accion, reintentar: false }\n//   - reintentar: { reintentar: true, motivoFallo, detalleFallo }                   (si quedan intentos)\n//   - sin texto:  { resumen: null, accion: null, reintentar: false, motivoFallo, detalleFallo }\n// Que la IA falle no cambia la prioridad: una vulnerabilidad \"alta\" debe avisarse aunque no haya resumen.\n\nconst NODO_SOLICITUD = 'M3 · Preparar reintento';\nconst MAX_INTENTOS = 2;\n// Coinciden con las columnas resumen_es VARCHAR2(1000) y accion VARCHAR2(500) de Oracle (v4)\nconst LIMITES = { resumen: 1000, accion: 500 };\n\nconst MOTIVOS = {\n  SIN_RESPUESTA: 'sin_respuesta',\n  JSON_INVALIDO: 'json_invalido',\n  CAMPO_FALTANTE: 'campo_faltante',\n  CAMPO_MUY_LARGO: 'campo_muy_largo',\n  ACCION_INCOMPLETA: 'accion_incompleta',\n};\n\n// Una acción de 1-2 palabras (p. ej. \"revisar\", visto con phi4-mini) no es ejecutable por el encargado.\nconst MIN_PALABRAS_ACCION = 3;\n\n// Duplicado de 03_preparar_solicitud.js: cada nodo Code de n8n es independiente y no puede importar otro.\nconst CAMPOS_CONTROL = ['intento', 'reintentar', 'motivoFallo', 'detalleFallo', 'solicitudOllama'];\n\nclass EntradaInvalidaError extends Error {\n  constructor(mensaje) {\n    super(mensaje);\n    this.name = 'EntradaInvalidaError';\n  }\n}\n\nfunction datosVulnerabilidad(item) {\n  return Object.fromEntries(Object.entries(item).filter(([k]) => !CAMPOS_CONTROL.includes(k)));\n}\n\nfunction fallo(motivo, detalle) {\n  return { ok: false, motivo, detalle };\n}\n\nfunction textoLimpio(valor) {\n  return typeof valor === 'string' ? valor.trim() : '';\n}\n\n/**\n * Interpreta la respuesta cruda de Ollama.\n * @param {Object} respuestaOllama  json del nodo HTTP: { response: string } o { error: string }\n * @returns {{ok: true, analisis: {resumen: string, accion: string}}\n *         | {ok: false, motivo: string, detalle: string}}\n */\nfunction interpretarRespuesta(respuestaOllama) {\n  if (!respuestaOllama || typeof respuestaOllama.response !== 'string') {\n    const detalle = textoLimpio(respuestaOllama && respuestaOllama.error) || 'la respuesta no trae el campo \"response\"';\n    return fallo(MOTIVOS.SIN_RESPUESTA, detalle);\n  }\n\n  let datos;\n  try {\n    datos = JSON.parse(respuestaOllama.response);\n  } catch (error) {\n    return fallo(MOTIVOS.JSON_INVALIDO, error.message);\n  }\n  if (datos === null || typeof datos !== 'object' || Array.isArray(datos)) {\n    return fallo(MOTIVOS.JSON_INVALIDO, 'se esperaba un objeto JSON');\n  }\n\n  const resumen = textoLimpio(datos.resumen);\n  const accion = textoLimpio(datos.accion);\n  if (resumen === '' || accion === '') {\n    return fallo(MOTIVOS.CAMPO_FALTANTE, 'faltan \"resumen\" o \"accion\"');\n  }\n  if (resumen.length > LIMITES.resumen || accion.length > LIMITES.accion) {\n    return fallo(MOTIVOS.CAMPO_MUY_LARGO, `resumen ${resumen.length}/${LIMITES.resumen}, accion ${accion.length}/${LIMITES.accion}`);\n  }\n  const palabras = accion.split(/\\s+/).length;\n  if (palabras < MIN_PALABRAS_ACCION) {\n    return fallo(MOTIVOS.ACCION_INCOMPLETA, `accion con ${palabras} palabra(s): ${JSON.stringify(accion)}`);\n  }\n\n  return { ok: true, analisis: { resumen, accion } };\n}\n\n/**\n * Decide el resultado final del item: análisis válido, reintento o sin texto de la IA.\n * @param {Object} solicitud        item que salió del nodo \"Preparar ...\" (vulnerabilidad + intento)\n * @param {Object} respuestaOllama  item que salió del nodo HTTP de Ollama\n * @throws {EntradaInvalidaError}\n */\nfunction resolverAnalisis(solicitud, respuestaOllama, maxIntentos = MAX_INTENTOS) {\n  if (!solicitud || typeof solicitud.cveID !== 'string' || !Number.isInteger(solicitud.intento)) {\n    throw new EntradaInvalidaError('Validar análisis: la solicitud original no tiene cveID o intento');\n  }\n  const vulnerabilidad = datosVulnerabilidad(solicitud);\n  const { intento } = solicitud;\n  const resultado = interpretarRespuesta(respuestaOllama);\n\n  if (resultado.ok) {\n    return { ...vulnerabilidad, ...resultado.analisis, intento, reintentar: false };\n  }\n  const diagnostico = { motivoFallo: resultado.motivo, detalleFallo: resultado.detalle };\n  if (intento < maxIntentos) {\n    return { ...vulnerabilidad, intento, reintentar: true, ...diagnostico };\n  }\n  return { ...vulnerabilidad, intento, reintentar: false, resumen: null, accion: null, ...diagnostico };\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  // El nodo HTTP reemplaza el item por la respuesta; la vulnerabilidad se recupera del nodo que preparó la solicitud.\n  return $input.all().map((item, i) => ({\n    json: resolverAnalisis($(NODO_SOLICITUD).itemMatching(i).json, item.json),\n  }));\n}\nmodule.exports = { resolverAnalisis, interpretarRespuesta, EntradaInvalidaError, MOTIVOS, MAX_INTENTOS, NODO_SOLICITUD };\n"
+      }
+    },
+    {
+      "id": "registro",
+      "name": "M4 · Preparar registro",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3600,
+        200
+      ],
+      "parameters": {
+        "jsCode": "// Módulo 4 — Preparar el registro para Oracle (nodo Code, modo \"Run Once for All Items\").\n// Convierte la vulnerabilidad analizada en los valores que usa el MERGE de \"M4 · Guardar en Oracle\".\n//\n// Entrada: la vulnerabilidad después del Analista IA (válida o con resumen/accion null).\n// Salida:  { registro: { cve_id, vendor, ..., accion } } con todos los valores como texto;\n//          '' representa NULL (Oracle trata la cadena vacía como NULL).\n\n// Tamaños (en bytes) de las columnas de sql/01_tablas.sql\nconst LIMITES = { vendor: 100, product: 150, nombre: 400, descripcion: 4000, severidad: 20, resumen_es: 1000, accion: 500 };\nconst PRIORIDADES = ['alta', 'media', 'baja', 'revisar'];\nconst FECHA = /^\\d{4}-\\d{2}-\\d{2}$/;\n\nclass RegistroInvalidoError extends Error {\n  constructor(mensaje) {\n    super(mensaje);\n    this.name = 'RegistroInvalidoError';\n  }\n}\n\nconst SUSPENSIVOS = '...';\n\nfunction bytesUtf8(caracter) {\n  const cp = caracter.codePointAt(0);\n  if (cp < 0x80) return 1;\n  if (cp < 0x800) return 2;\n  if (cp < 0x10000) return 3;\n  return 4;\n}\n\n/**\n * Recorta al tamaño de la columna para que un texto largo no tumbe el guardado (ORA-12899).\n * Cuenta bytes UTF-8, no caracteres: VARCHAR2(n) en Oracle XE mide en bytes y \"á\" ocupa 2.\n */\nfunction ajustar(valor, limiteBytes) {\n  if (valor === null || valor === undefined) return '';\n  const caracteres = Array.from(String(valor));\n  const total = caracteres.reduce((suma, c) => suma + bytesUtf8(c), 0);\n  if (total <= limiteBytes) return caracteres.join('');\n\n  const disponible = limiteBytes - SUSPENSIVOS.length;\n  let usados = 0;\n  let corte = 0;\n  while (corte < caracteres.length && usados + bytesUtf8(caracteres[corte]) <= disponible) {\n    usados += bytesUtf8(caracteres[corte]);\n    corte += 1;\n  }\n  return caracteres.slice(0, corte).join('') + SUSPENSIVOS;\n}\n\n/**\n * @param {Object} v  vulnerabilidad analizada\n * @returns {Object}  valores para los parámetros del MERGE\n * @throws {RegistroInvalidoError}  si faltan datos que la tabla exige con formato fijo\n */\nfunction aRegistroOracle(v) {\n  const cve = v && v.cveID;\n  if (typeof cve !== 'string' || cve === '' || cve.length > 20) {\n    throw new RegistroInvalidoError(`Preparar registro: cveID inválido (${JSON.stringify(cve)})`);\n  }\n  if (!FECHA.test(v.dateAdded) || !FECHA.test(v.dueDate)) {\n    throw new RegistroInvalidoError(`Preparar registro ${cve}: dateAdded/dueDate deben ser YYYY-MM-DD`);\n  }\n  if (!PRIORIDADES.includes(v.prioridad)) {\n    throw new RegistroInvalidoError(`Preparar registro ${cve}: prioridad inválida (${JSON.stringify(v.prioridad)})`);\n  }\n  if (v.cvss !== null && (typeof v.cvss !== 'number' || v.cvss < 0 || v.cvss > 10)) {\n    throw new RegistroInvalidoError(`Preparar registro ${cve}: cvss fuera de rango (${JSON.stringify(v.cvss)})`);\n  }\n\n  return {\n    cve_id: cve,\n    vendor: ajustar(v.vendor, LIMITES.vendor),\n    product: ajustar(v.product, LIMITES.product),\n    nombre: ajustar(v.name, LIMITES.nombre),\n    descripcion: ajustar(v.description, LIMITES.descripcion),\n    fecha_kev: v.dateAdded,\n    fecha_limite: v.dueDate,\n    ransomware: v.ransomware === true ? 'S' : 'N',\n    // Punto decimal fijo: el MERGE lo convierte con TO_NUMBER(..., NLS_NUMERIC_CHARACTERS = '.,')\n    cvss: v.cvss === null ? '' : v.cvss.toFixed(1),\n    severidad: ajustar(v.severidad, LIMITES.severidad),\n    resumen_es: ajustar(v.resumen, LIMITES.resumen_es),\n    prioridad: v.prioridad,\n    accion: ajustar(v.accion, LIMITES.accion),\n  };\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  return $input.all().map(item => ({ json: { ...item.json, registro: aRegistroOracle(item.json) } }));\n}\nmodule.exports = { aRegistroOracle, ajustar, RegistroInvalidoError, LIMITES };\n"
+      }
+    },
+    {
+      "id": "guardar",
+      "name": "M4 · Guardar en Oracle",
+      "type": "n8n-nodes-base.oracleDatabase",
+      "typeVersion": 1,
+      "position": [
+        3840,
+        200
+      ],
+      "parameters": {
+        "operation": "execute",
+        "query": "MERGE INTO vulnerabilidades v\nUSING (SELECT :cve_id AS cve_id FROM dual) s\nON (v.cve_id = s.cve_id)\nWHEN NOT MATCHED THEN\n  INSERT (cve_id, vendor, product, nombre, descripcion, fecha_kev, fecha_limite,\n          ransomware, cvss, severidad, resumen_es, prioridad, accion)\n  VALUES (:cve_id, :vendor, :product, :nombre, :descripcion,\n          TO_DATE(:fecha_kev, 'YYYY-MM-DD'), TO_DATE(:fecha_limite, 'YYYY-MM-DD'),\n          :ransomware, TO_NUMBER(:cvss, '99D9', 'NLS_NUMERIC_CHARACTERS = ''.,'''),\n          :severidad, :resumen_es, :prioridad, :accion)",
+        "options": {
+          "params": {
+            "values": [
+              {
+                "name": "cve_id",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.cve_id }}"
+              },
+              {
+                "name": "vendor",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.vendor }}"
+              },
+              {
+                "name": "product",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.product }}"
+              },
+              {
+                "name": "nombre",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.nombre }}"
+              },
+              {
+                "name": "descripcion",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.descripcion }}"
+              },
+              {
+                "name": "fecha_kev",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.fecha_kev }}"
+              },
+              {
+                "name": "fecha_limite",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.fecha_limite }}"
+              },
+              {
+                "name": "ransomware",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.ransomware }}"
+              },
+              {
+                "name": "cvss",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.cvss }}"
+              },
+              {
+                "name": "severidad",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.severidad }}"
+              },
+              {
+                "name": "resumen_es",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.resumen_es }}"
+              },
+              {
+                "name": "prioridad",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.prioridad }}"
+              },
+              {
+                "name": "accion",
+                "datatype": "string",
+                "valueString": "={{ $json.registro.accion }}"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "pendientes",
+      "name": "M5 · Pendientes de notificar",
+      "type": "n8n-nodes-base.oracleDatabase",
+      "typeVersion": 1,
+      "position": [
+        480,
+        500
+      ],
+      "parameters": {
+        "operation": "execute",
+        "query": "SELECT cve_id                              AS \"cveID\",\n       vendor                              AS \"vendor\",\n       product                             AS \"product\",\n       descripcion                         AS \"description\",\n       TO_CHAR(fecha_limite, 'YYYY-MM-DD') AS \"dueDate\",\n       ransomware                          AS \"ransomware\",\n       cvss                                AS \"cvss\",\n       resumen_es                          AS \"resumen\",\n       prioridad                           AS \"prioridad\",\n       accion                              AS \"accion\"\nFROM vulnerabilidades\nWHERE prioridad IN ('alta', 'revisar')\n  AND notificado = 'N'\nORDER BY fecha_kev DESC, cve_id",
+        "options": {}
+      },
+      "executeOnce": true
     },
     {
       "id": "formato",
@@ -68,10 +407,10 @@
       "typeVersion": 2,
       "position": [
         720,
-        100
+        500
       ],
       "parameters": {
-        "jsCode": "// Módulo 5 — Formato del mensaje de Telegram (nodo Code, modo \"Run Once for All Items\").\n// v2: se usa SIN IA (resumen = descripción de CISA). En v3/v4 llegan resumen, prioridad, accion y cvss.\n// El nodo Telegram debe enviar el campo {{ $json.mensaje }} como texto plano (sin parse mode).\n\nconst ICONOS = { alta: '🔴', media: '🟠', baja: '🟢', revisar: '⚪' };\n\nfunction formatearMensaje(v) {\n  const prioridad = v.prioridad || 'revisar';\n  const icono = ICONOS[prioridad] || ICONOS.revisar;\n  const cvss = v.cvss != null ? `CVSS ${v.cvss}` : 'CVSS s/d';\n  const ransomware = v.ransomware ? 'sí' : 'no';\n\n  return [\n    `${icono} PRIORIDAD ${prioridad.toUpperCase()} — ${v.cveID}`,\n    `Producto: ${v.vendor} ${v.product}  |  ${cvss}  |  Ransomware: ${ransomware}`,\n    `Qué pasa: ${v.resumen || v.description}`,\n    `Qué hacer: ${v.accion || 'Revisar el boletín del fabricante y aplicar la actualización.'}`,\n    `Fecha límite CISA: ${v.dueDate}`,\n  ].join('\\n');\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  return $input.all().map(item => ({\n    json: { ...item.json, mensaje: formatearMensaje(item.json) },\n  }));\n}\nmodule.exports = { formatearMensaje };\n"
+        "jsCode": "// Módulo 5 — Formato del mensaje de Telegram (nodo Code, modo \"Run Once for All Items\").\n// v4: la entrada son las filas pendientes de Oracle (nodo \"M5 · Pendientes de notificar\").\n// Si la IA no produjo resumen o acción, el mensaje usa la descripción de CISA y una acción genérica.\n// El nodo Telegram debe enviar el campo {{ $json.mensaje }} como texto plano (sin parse mode).\n\nconst ICONOS = { alta: '🔴', media: '🟠', baja: '🟢', revisar: '⚪' };\n\nfunction formatearMensaje(v) {\n  const prioridad = v.prioridad || 'revisar';\n  const icono = ICONOS[prioridad] || ICONOS.revisar;\n  const cvss = v.cvss != null ? `CVSS ${v.cvss}` : 'CVSS s/d';\n  const ransomware = v.ransomware ? 'sí' : 'no';\n\n  return [\n    `${icono} PRIORIDAD ${prioridad.toUpperCase()} — ${v.cveID}`,\n    `Producto: ${v.vendor} ${v.product}  |  ${cvss}  |  Ransomware: ${ransomware}`,\n    `Qué pasa: ${v.resumen || v.description}`,\n    `Qué hacer: ${v.accion || 'Revisar el boletín del fabricante y aplicar la actualización.'}`,\n    `Fecha límite CISA: ${v.dueDate}`,\n  ].join('\\n');\n}\n\n/**\n * Convierte una fila de Oracle (alias de sql/02_consultas.sql) al formato que usa formatearMensaje.\n * @param {Object} fila  { cveID, vendor, product, description, dueDate, ransomware: 'S'|'N', cvss, resumen, prioridad, accion }\n * @returns {Object|null}  null si la fila no es una vulnerabilidad (p. ej. { success: true } cuando no hay pendientes)\n */\nfunction filaOracleAVulnerabilidad(fila) {\n  if (!fila || typeof fila.cveID !== 'string') return null;\n  return { ...fila, ransomware: fila.ransomware === 'S' };\n}\n\n// ---- Punto de entrada ----\nif (typeof $input !== 'undefined') {\n  return $input.all()\n    .map(item => filaOracleAVulnerabilidad(item.json))\n    .filter(v => v !== null)\n    .map(v => ({ json: { ...v, mensaje: formatearMensaje(v) } }));\n}\nmodule.exports = { formatearMensaje, filaOracleAVulnerabilidad };\n"
       }
     },
     {
@@ -81,13 +420,38 @@
       "typeVersion": 1.2,
       "position": [
         960,
-        100
+        500
       ],
       "parameters": {
         "chatId": "",
         "text": "={{ $json.mensaje }}",
         "additionalFields": {
           "appendAttribution": false
+        }
+      }
+    },
+    {
+      "id": "marcar",
+      "name": "M5 · Marcar notificado",
+      "type": "n8n-nodes-base.oracleDatabase",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        500
+      ],
+      "parameters": {
+        "operation": "execute",
+        "query": "UPDATE vulnerabilidades\nSET notificado = 'S'\nWHERE cve_id = :cve_id",
+        "options": {
+          "params": {
+            "values": [
+              {
+                "name": "cve_id",
+                "datatype": "string",
+                "valueString": "={{ $('M5 · Formatear mensaje').item.json.cveID }}"
+              }
+            ]
+          }
         }
       }
     }
@@ -119,6 +483,22 @@
       "main": [
         [
           {
+            "node": "M4 · Leer inventario",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M5 · Pendientes de notificar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M4 · Leer inventario": {
+      "main": [
+        [
+          {
             "node": "M2 · Filtrar por fecha e inventario",
             "type": "main",
             "index": 0
@@ -127,6 +507,156 @@
       ]
     },
     "M2 · Filtrar por fecha e inventario": {
+      "main": [
+        [
+          {
+            "node": "M4 · CVE ya registrados",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M4 · CVE ya registrados": {
+      "main": [
+        [
+          {
+            "node": "M4 · Descartar ya registrados",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M4 · Descartar ya registrados": {
+      "main": [
+        [
+          {
+            "node": "M4 · Consultar NVD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M4 · Consultar NVD": {
+      "main": [
+        [
+          {
+            "node": "M4 · Calcular CVSS y prioridad",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M4 · Calcular CVSS y prioridad": {
+      "main": [
+        [
+          {
+            "node": "M3 · Preparar solicitud",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M3 · Preparar solicitud": {
+      "main": [
+        [
+          {
+            "node": "M3 · Consultar Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M3 · Consultar Ollama": {
+      "main": [
+        [
+          {
+            "node": "M3 · Validar análisis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M3 · Validar análisis": {
+      "main": [
+        [
+          {
+            "node": "¿Reintentar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Reintentar?": {
+      "main": [
+        [
+          {
+            "node": "M3 · Preparar reintento",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "M4 · Preparar registro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M3 · Preparar reintento": {
+      "main": [
+        [
+          {
+            "node": "M3 · Consultar Ollama (reintento)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M3 · Consultar Ollama (reintento)": {
+      "main": [
+        [
+          {
+            "node": "M3 · Validar reintento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M3 · Validar reintento": {
+      "main": [
+        [
+          {
+            "node": "M4 · Preparar registro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M4 · Preparar registro": {
+      "main": [
+        [
+          {
+            "node": "M4 · Guardar en Oracle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M5 · Pendientes de notificar": {
       "main": [
         [
           {
@@ -142,6 +672,17 @@
         [
           {
             "node": "M5 · Enviar a Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M5 · Enviar a Telegram": {
+      "main": [
+        [
+          {
+            "node": "M5 · Marcar notificado",
             "type": "main",
             "index": 0
           }
